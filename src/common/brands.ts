@@ -11,6 +11,12 @@ type BrandsMapping = {
     [key: string]: string[]
 }
 
+const firstWordValidationList = [
+    "rich", "rff", "flex", "ultra", "gum", "beauty", "orto", "free", "112", "kin", "happy", "heel", "contour", "nero", "rsv"
+]
+
+const secondWordValidationList = ["heel", "contour", "nero", "rsv"]
+
 export async function getBrandsMapping(): Promise<BrandsMapping> {
     const brandConnections = connections
 
@@ -49,21 +55,55 @@ async function getPharmacyItems(countryCode: countryCodes, source: sources, vers
     return finalProducts
 }
 
+export function normalizeInputIfAccentInsensitive(input: string): string {
+    const isAccentInsensitive = /[\u0300-\u036f\u00C0-\u017F]/.test(input.normalize("NFD")) // Check for accented characters in the input
+
+    if (isAccentInsensitive) {
+        return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents if any are found
+    } else {
+        return input // Return the original input if no accents are found
+    }
+}
+
 export function checkBrandIsSeparateTerm(input: string, brand: string): boolean {
     // Escape any special characters in the brand name for use in a regular expression
     const escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
+    input = normalizeInputIfAccentInsensitive(input) // Normalize input for accent insensitivity
+    
     // Check if the brand is at the beginning or end of the string
-    const atBeginningOrEnd = new RegExp(
+    const atBeginningOrEndOrMiddle = new RegExp(
         `^(?:${escapedBrand}\\s|.*\\s${escapedBrand}\\s.*|.*\\s${escapedBrand})$`,
         "i"
     ).test(input)
 
+    if(firstWordValidationList.includes(brand)){ // Additional check for brands that are common words at the start
+        const atBeginning = new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the beginning of the title string
+
+        if(!atBeginning){
+            return false // If the brand is not at the beginning, return false
+        }
+    }
+
+
+    const at2ndPosition = new RegExp(`^\\S+\\s+${escapedBrand}(\\b|\\s|$)`, "i").test(input);
+    
     // Check if the brand is a separate term in the string
     const separateTerm = new RegExp(`\\b${escapedBrand}\\b`, "i").test(input)
+    if ((input.includes('LIVOL EXTRA') || input.includes('GUM Travel') || input.includes('BABE') || input.includes('HAPPY')) && (atBeginningOrEndOrMiddle === true || separateTerm === true)) {
+        console.log('Checking brand:', brand, 'in input:', input);
+        console.log('Escaped brand:', escapedBrand);
+        console.log({
+        input,
+        brand,
+        atBeginningOrEndOrMiddle,
+        at2ndPosition,
+        separateTerm
+    });
+    }
 
     // The brand should be at the beginning, end, or a separate term
-    return atBeginningOrEnd || separateTerm
+    return atBeginningOrEndOrMiddle || separateTerm
 }
 
 export async function assignBrandIfKnown(countryCode: countryCodes, source: sources, job?: Job) {
@@ -77,10 +117,10 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
     for (let product of products) {
         counter++
 
-        if (product.m_id) {
-            // Already exists in the mapping table, probably no need to update
-            continue
-        }
+        // if (product.m_id) {
+        //     // Already exists in the mapping table, probably no need to update
+        //     continue
+        // }
 
         let matchedBrands = []
         for (const brandKey in brandsMapping) {
