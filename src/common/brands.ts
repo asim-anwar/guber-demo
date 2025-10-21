@@ -29,6 +29,7 @@ export async function getBrandsMapping(): Promise<BrandsMapping> {
         const brand1 = manufacturer_p1.toLowerCase()
         const brands2 = manufacturers_p2.toLowerCase()
         const brand2Array = brands2.split(";").map((b) => b.trim())
+        // Initialize sets if not already present
         if (!brandMap.has(brand1)) {
             brandMap.set(brand1, new Set())
         }
@@ -36,12 +37,14 @@ export async function getBrandsMapping(): Promise<BrandsMapping> {
             if (!brandMap.has(brand2)) {
                 brandMap.set(brand2, new Set())
             }
+
+            // Create bidirectional relationships
             brandMap.get(brand1)!.add(brand2)
             brandMap.get(brand2)!.add(brand1)
         })
     })
 
-    // Convert the flat map to an object for easier usage
+    // Converting the flat map to an object for easier usage
     const brandsMapping: Record<string, string[]> = {}
 
     brandMap.forEach((relatedBrands, brand) => {
@@ -55,12 +58,12 @@ function buildCanonicalLookup(brandsMapping: Record<string, string[]>): Record<s
     const canonicalLookup: Record<string, string> = {}
 
     for (const [_, relatedBrands] of Object.entries(brandsMapping)) {
-        // Filter out ignored brands when selecting canonical
+        // Filter out ignored brands when selecting main brand
         const filteredBrands = relatedBrands.filter(
             (b) => !ignoreBrandsList.includes(b.toLowerCase())
         )
 
-        // Pick the shortest brand name in the group
+        // Pick the shortest brand name in the group (this can be adjusted to other criteria, for now I chose shortest)
         const canonicalBrand = filteredBrands.length > 0
             ? filteredBrands.reduce((shortest, current) =>
                 current.length < shortest.length ? current : shortest
@@ -70,7 +73,7 @@ function buildCanonicalLookup(brandsMapping: Record<string, string[]>): Record<s
                 current.length < shortest.length ? current : shortest
             )
 
-        // Map every brand (in lowercase) to the canonical one
+        // Map every brand (in lowercase) to the main brand one
         for (const brand of relatedBrands) {
             canonicalLookup[brand.toLowerCase()] = canonicalBrand.toLowerCase()
         }
@@ -86,13 +89,13 @@ async function getPharmacyItems(countryCode: countryCodes, source: sources, vers
 }
 
 export function normalizeInputIfAccentInsensitive(input: string): string {
-    const isAccentInsensitive = /[\u0300-\u036f\u00C0-\u017F]/.test(input.normalize("NFD")) // Check for accented characters in the input
+    const hasAccentMarking = /[\u0300-\u036f\u00C0-\u017F]/.test(input.normalize("NFD")) // Check for accented characters are present in the input/product title
 
-    if (isAccentInsensitive) {
+    if (hasAccentMarking) {
         return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents if any are found
-    } else {
-        return input // Return the original input if no accents are found
     }
+
+    return input // Return the original input if no accents are found
 }
 
 export function checkBrandIsSeparateTerm(input: string, brand: string): boolean {
@@ -103,32 +106,33 @@ export function checkBrandIsSeparateTerm(input: string, brand: string): boolean 
 
     input = normalizeInputIfAccentInsensitive(input) // Normalize input for accent insensitivity
     
-    // Check if the brand is at the beginning or end of the string
+    // Check if the brand is at the beginning or end or middle of the product title
     const atBeginningOrEndOrMiddle = new RegExp(
         `^(?:${escapedBrand}\\s|.*\\s${escapedBrand}\\s.*|.*\\s${escapedBrand})$`,
         "i"
     ).test(input)
 
-    if(firstWordBrandValidationList.includes(brand)){ // Additional check for brands that are common words at the start
+    // Additional check for brands that are common words at the start of the product title
+    if(firstWordBrandValidationList.includes(brand)){
         const atBeginning = new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the beginning of the title string
 
-        if(!atBeginning){
-            return false // If the brand is not at the beginning, return false
-        }
+        // return true only if at the beginning
+        return atBeginning
     }
 
-    if(firstOrSecondWordBrandValidationList.includes(brand)){ // Additional check for brands that are common words at the second position
+    // Additional check for brands that are common words at the first or second position of the product title
+    if(firstOrSecondWordBrandValidationList.includes(brand)){
         const atBeginning = new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the beginning of the title string
-        const atSecondPosition = new RegExp(`^\\S+\\s+${escapedBrand}(\\b|\\s|$)`, "i").test(input);
-        if(!atBeginning && !atSecondPosition){
-            return false // If the brand is not at the beginning or second position, return false
-        }
+        const atSecondPosition = new RegExp(`^\\S+\\s+${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the second position of the title string
+        
+        // return true if at either the beginning or second position
+        return atBeginning || atSecondPosition
     }
     
     // Check if the brand is a separate term in the string
     const separateTerm = new RegExp(`\\b${escapedBrand}\\b`, "i").test(input)
 
-    // The brand should be at the beginning, end, or a separate term
+    // The brand should be inside product title string or a separate term
     return atBeginningOrEndOrMiddle || separateTerm
 }
 
@@ -142,35 +146,38 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
     let products = await getPharmacyItems(countryCode, source, versionKey, false)
     let counter = 0
     let results: any[] = []
-    for (let product of products) {
-        counter++
-        let mainBrand: string = null
 
+    // Get all brands as a flat list for efficient iteration
+    const allBrands = new Set<string>()
+    Object.values(brandsMapping).forEach(brands => {
+        brands.forEach(brand => allBrands.add(brand))
+    })
+
+    for (let product of products) {
         // if (product.m_id) {
         //     // Already exists in the mapping table, probably no need to update
         //     continue
         // }
 
         let matchedBrands = []
-        for (const brandKey in brandsMapping) {
-            const relatedBrands = brandsMapping[brandKey]
-            for (const brand of relatedBrands) {
-                if (matchedBrands.includes(brand) || ignoreBrandsList.includes(brand)) {
-                    continue
-                }
-                const isBrandMatch = checkBrandIsSeparateTerm(product.title, brand)
-                if (isBrandMatch) {
-                    matchedBrands.push(brand)
-                }
+        
+        // Check for each brand if it exists in the product title and skip already matched or ignored brands
+        for (const brand of allBrands) {
+            if (matchedBrands.includes(brand) || ignoreBrandsList.includes(brand)) {
+                continue
+            }
+            const isBrandMatch = checkBrandIsSeparateTerm(product.title, brand)
+            if (isBrandMatch) {
+                matchedBrands.push(brand)
             }
         }
 
-         let priorityBrand: string = null
+        let mainBrand: string = null
+        let priorityBrand: string = null
 
         if (matchedBrands.length > 0) {
-            const allConnected = new Set<string>()
-
             // Find all related brands that connect through the mapping
+            const allConnected = new Set<string>()
             matchedBrands.forEach((b) => {
             const related = brandsMapping[b.toLowerCase()] || []
             related.forEach((r) => allConnected.add(r.toLowerCase()))
@@ -180,26 +187,31 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
             const allPossible = new Set([...matchedBrands.map((b) => b.toLowerCase()), ...allConnected])
 
             // Choose the brand that appears first in the product title as the priority brand, this solves the issue of multiple brands being matched
-            priorityBrand = Array.from(allPossible).reduce((best, b) => {
-                const idx = product.title.toLowerCase().indexOf(b)
-                if (idx === -1) return best
-                if (best === null) return b
-                return product.title.toLowerCase().indexOf(best) < idx ? best : b
-            }, null)
+            let earliestIndex = Infinity
+
+            for (const brand of allPossible) {
+                const index = product.title.toLowerCase().indexOf(brand)
+                if (index !== -1 && index < earliestIndex) {
+                    earliestIndex = index
+                    priorityBrand = brand
+                }
+            }
 
             if(!priorityBrand){
                 priorityBrand = matchedBrands[0].toLowerCase()
             }
 
+            // Finally, get the main brand from the canonical lookup
             mainBrand = canonicalLookup[priorityBrand.toLowerCase()] || priorityBrand.toLowerCase()
 
-            results.push({
-                productTitle: product.title,
-                matchedBrands,
-                priorityBrand,
-                assignedBrand: mainBrand
-            })
         }
+        
+        results.push({
+            productTitle: product.title,
+            matchedBrands,
+            priorityBrand,
+            assignedBrand: mainBrand
+        })
 
         console.log(`${product.title} -> ${priorityBrand} (matched: ${matchedBrands.join(", ")})`)
         const sourceId = product.source_id
