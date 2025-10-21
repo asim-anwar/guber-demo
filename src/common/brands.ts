@@ -2,7 +2,7 @@ import { Job } from "bullmq"
 import { countryCodes, dbServers, EngineType } from "../config/enums"
 import { ContextType } from "../libs/logger"
 import { jsonOrStringForDb, jsonOrStringToJson, stringOrNullForDb, stringToHash } from "../utils"
-import _ from "lodash"
+import _, { lte } from "lodash"
 import { sources } from "../sites/sources"
 import items from "./../../pharmacyItems.json"
 import connections from "./../../brandConnections.json"
@@ -12,10 +12,9 @@ type BrandsMapping = {
 }
 
 const firstWordValidationList = [
-    "rich", "rff", "flex", "ultra", "gum", "beauty", "orto", "free", "112", "kin", "happy", "heel", "contour", "nero", "rsv"
-]
+    "rich", "rff", "flex", "ultra", "gum", "beauty", "orto", "free", "112", "kin", "happy", "HAPPY"]
 
-const secondWordValidationList = ["heel", "contour", "nero", "rsv"]
+const firstOrSecondWordValidationList = ["heel", "contour", "nero", "rsv"]
 
 export async function getBrandsMapping(): Promise<BrandsMapping> {
     const brandConnections = connections
@@ -40,13 +39,13 @@ export async function getBrandsMapping(): Promise<BrandsMapping> {
     })
 
     // Convert the flat map to an object for easier usage
-    const flatMapObject: Record<string, string[]> = {}
+    const brandsMapping: Record<string, string[]> = {}
 
     brandMap.forEach((relatedBrands, brand) => {
-        flatMapObject[brand] = Array.from(relatedBrands)
+        brandsMapping[brand] = Array.from(relatedBrands)
     })
 
-    return flatMapObject
+    return brandsMapping  
 }
 
 async function getPharmacyItems(countryCode: countryCodes, source: sources, versionKey: string, mustExist = true) {
@@ -67,7 +66,9 @@ export function normalizeInputIfAccentInsensitive(input: string): string {
 
 export function checkBrandIsSeparateTerm(input: string, brand: string): boolean {
     // Escape any special characters in the brand name for use in a regular expression
-    const escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    let escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+    if (escapedBrand === "happy") escapedBrand = escapedBrand.toUpperCase() // Special case for "happy" brand to match uppercase in input
 
     input = normalizeInputIfAccentInsensitive(input) // Normalize input for accent insensitivity
     
@@ -82,6 +83,14 @@ export function checkBrandIsSeparateTerm(input: string, brand: string): boolean 
 
         if(!atBeginning){
             return false // If the brand is not at the beginning, return false
+        }
+    }
+
+    if(firstOrSecondWordValidationList.includes(brand)){ // Additional check for brands that are common words at the second position
+        const atBeginning = new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the beginning of the title string
+        const atSecondPosition = new RegExp(`^\\S+\\s+${escapedBrand}(\\b|\\s|$)`, "i").test(input);
+        if(!atBeginning && !atSecondPosition){
+            return false // If the brand is not at the beginning or second position, return false
         }
     }
 
@@ -135,7 +144,31 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
                 }
             }
         }
-        console.log(`${product.title} -> ${_.uniq(matchedBrands)}`)
+
+         let priorityBrand: string = null
+
+        if (matchedBrands.length > 0) {
+            const allConnected = new Set<string>()
+
+            // Find all related brands that connect through the mapping
+            matchedBrands.forEach((b) => {
+            const related = brandsMapping[b.toLowerCase()] || []
+            related.forEach((r) => allConnected.add(r.toLowerCase()))
+            })
+
+            // Merge matched brands + all connected ones
+            const allPossible = new Set([...matchedBrands.map((b) => b.toLowerCase()), ...allConnected])
+
+            // Choose the brand that appears first in the product title as the priority brand, this solves the issue of multiple brands being matched
+            priorityBrand = Array.from(allPossible).reduce((best, b) => {
+                const idx = product.title.toLowerCase().indexOf(b)
+                if (idx === -1) return best
+                if (best === null) return b
+                return product.title.toLowerCase().indexOf(best) < idx ? best : b
+            }, null)
+        }
+
+        console.log(`${product.title} -> ${priorityBrand} (matched: ${matchedBrands.join(", ")})`)
         const sourceId = product.source_id
         const meta = { matchedBrands }
         const brand = matchedBrands.length ? matchedBrands[0] : null
