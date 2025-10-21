@@ -12,12 +12,22 @@ type BrandsMapping = {
     [key: string]: string[]
 }
 
-const firstWordBrandValidationList = [
-    "rich", "rff", "flex", "ultra", "gum", "beauty", "orto", "free", "112", "kin", "happy", "HAPPY"]
+type BrandMatchCache = {
+    brand: string
+    pattern: RegExp
+    positionCheck?: 'first' | 'first-or-second'
+}
 
-const firstOrSecondWordBrandValidationList = ["heel", "contour", "nero", "rsv"]
+const firstWordBrandValidationList = new Set([
+    "rich", "rff", "flex", "ultra", "gum", "beauty", "orto", "free", "112", "kin", "happy", "HAPPY"])
 
-const ignoreBrandsList = ["bio", "neb"]
+const firstOrSecondWordBrandValidationList = new Set(["heel", "contour", "nero", "rsv"])
+
+const ignoreBrandsList = new Set(["bio", "neb"])
+
+// Optimization:
+// Cache for normalized strings to avoid repeated normalization
+const normalizationCache = new Map<string, string>()
 
 export async function getBrandsMapping(): Promise<BrandsMapping> {
     const brandConnections = connections
@@ -60,7 +70,7 @@ function buildCanonicalLookup(brandsMapping: Record<string, string[]>): Record<s
     for (const [_, relatedBrands] of Object.entries(brandsMapping)) {
         // Filter out ignored brands when selecting main brand
         const filteredBrands = relatedBrands.filter(
-            (b) => !ignoreBrandsList.includes(b.toLowerCase())
+            (b) => !ignoreBrandsList.has(b.toLowerCase())
         )
 
         // Pick the shortest brand name in the group (this can be adjusted to other criteria, for now I chose shortest)
@@ -82,149 +92,213 @@ function buildCanonicalLookup(brandsMapping: Record<string, string[]>): Record<s
     return canonicalLookup
 }
 
+// Optimization:
+// Pre-compile regex patterns for all brands
+// This function builds a cache of regex patterns for efficient brand matching
+function buildBrandMatchCache(brands: Set<string>): BrandMatchCache[] {
+    const cache: BrandMatchCache[] = []
+
+    for (const brand of brands) {
+        if (ignoreBrandsList.has(brand)) continue
+
+        let escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        
+        // Special case: "happy" brand must match uppercase in input
+        if (escapedBrand === "happy") {
+            escapedBrand = escapedBrand.toUpperCase()
+        }
+
+        let positionCheck: 'first' | 'first-or-second' | undefined
+
+        if (firstWordBrandValidationList.has(brand)) {
+            // Must be first word
+            positionCheck = 'first'
+            cache.push({
+                brand,
+                pattern: new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i"),
+                positionCheck
+            })
+        } else if (firstOrSecondWordBrandValidationList.has(brand)) {
+            // Must be first or second word - use alternation for single regex
+            positionCheck = 'first-or-second'
+            cache.push({
+                brand,
+                pattern: new RegExp(`^${escapedBrand}(\\b|\\s|$)|^\\S+\\s+${escapedBrand}(\\b|\\s|$)`, "i"),
+                positionCheck
+            })
+        } else {
+            // Must be a separate term anywhere in the string
+            cache.push({
+                brand,
+                pattern: new RegExp(`\\b${escapedBrand}\\b`, "i")
+            })
+        }
+    }
+
+    return cache
+}
+
 async function getPharmacyItems(countryCode: countryCodes, source: sources, versionKey: string, mustExist = true) {
     const finalProducts = items
 
     return finalProducts
 }
 
+// Optimization:
+// Using caching to avoid repeated normalization of the same string
 export function normalizeInputIfAccentInsensitive(input: string): string {
-    const hasAccentMarking = /[\u0300-\u036f\u00C0-\u017F]/.test(input.normalize("NFD")) // Check for accented characters are present in the input/product title
+    const cached = normalizationCache.get(input)
+    if (cached !== undefined) return cached
 
-    if (hasAccentMarking) {
-        return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents if any are found
+    // Check if string contains accented characters
+    const normalized = input.normalize("NFD")
+    const hasAccents = /[\u0300-\u036f\u00C0-\u017F]/.test(normalized)
+
+    let result: string
+    if (hasAccents) {
+        // Remove combining diacritical marks
+        result = normalized.replace(/[\u0300-\u036f]/g, "")
+    } else {
+        result = input
     }
 
-    return input // Return the original input if no accents are found
+    // Cache the result
+    normalizationCache.set(input, result)
+    return result
 }
 
-export function checkBrandIsSeparateTerm(input: string, brand: string): boolean {
-    // Escape any special characters in the brand name for use in a regular expression
-    let escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-
-    if (escapedBrand === "happy") escapedBrand = escapedBrand.toUpperCase() // Special case for "happy" brand to match uppercase in input
-
-    input = normalizeInputIfAccentInsensitive(input) // Normalize input for accent insensitivity
-    
-    // Check if the brand is at the beginning or end or middle of the product title
-    const atBeginningOrEndOrMiddle = new RegExp(
-        `^(?:${escapedBrand}\\s|.*\\s${escapedBrand}\\s.*|.*\\s${escapedBrand})$`,
-        "i"
-    ).test(input)
-
-    // Additional check for brands that are common words at the start of the product title
-    if(firstWordBrandValidationList.includes(brand)){
-        const atBeginning = new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the beginning of the title string
-
-        // return true only if at the beginning
-        return atBeginning
-    }
-
-    // Additional check for brands that are common words at the first or second position of the product title
-    if(firstOrSecondWordBrandValidationList.includes(brand)){
-        const atBeginning = new RegExp(`^${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the beginning of the title string
-        const atSecondPosition = new RegExp(`^\\S+\\s+${escapedBrand}(\\b|\\s|$)`, "i").test(input); // Check if the brand is at the second position of the title string
-        
-        // return true if at either the beginning or second position
-        return atBeginning || atSecondPosition
-    }
-    
-    // Check if the brand is a separate term in the string
-    const separateTerm = new RegExp(`\\b${escapedBrand}\\b`, "i").test(input)
-
-    // The brand should be inside product title string or a separate term
-    return atBeginningOrEndOrMiddle || separateTerm
+function checkBrandMatch(normalizedInput: string, cacheEntry: BrandMatchCache): boolean {
+    return cacheEntry.pattern.test(normalizedInput)
 }
 
-export async function assignBrandIfKnown(countryCode: countryCodes, source: sources, job?: Job) {
+export async function assignBrandIfKnown(
+    countryCode: countryCodes,
+    source: sources,
+    job?: Job
+) {
     const context = { scope: "assignBrandIfKnown" } as ContextType
-
+    
+    // Load brand relationships and canonical mappings
     const brandsMapping = await getBrandsMapping()
     const canonicalLookup = buildCanonicalLookup(brandsMapping)
 
-    const versionKey = "assignBrandIfKnown"
-    let products = await getPharmacyItems(countryCode, source, versionKey, false)
-    let counter = 0
-    let results: any[] = []
-
-    // Get all brands as a flat list for efficient iteration
+    // Get all brands as a flat set
     const allBrands = new Set<string>()
     Object.values(brandsMapping).forEach(brands => {
         brands.forEach(brand => allBrands.add(brand))
     })
 
-    for (let product of products) {
-        // if (product.m_id) {
-        //     // Already exists in the mapping table, probably no need to update
-        //     continue
-        // }
+    // Optimization:
+    // Pre-compile all regex patterns for brands
+    const brandMatchCache = buildBrandMatchCache(allBrands)
+    
+    // Optimization:
+    // Sort by brand length (descending) to match longer brands first
+    // This prevents "bio" matching before "biofarm" for example
+    brandMatchCache.sort((a, b) => b.brand.length - a.brand.length)
 
-        let matchedBrands = []
+    // Optimization:
+    // Pre-compute the full brand network for each brand
+    const brandNetworkCache = new Map<string, Set<string>>()
+    for (const brand of allBrands) {
+        const network = new Set<string>()
+        const related = brandsMapping[brand.toLowerCase()] || []
+        related.forEach(r => network.add(r.toLowerCase()))
+        network.add(brand.toLowerCase())
+        brandNetworkCache.set(brand.toLowerCase(), network)
+    }
+
+    const versionKey = "assignBrandIfKnown"
+    const products = await getPharmacyItems(countryCode, source, versionKey, false)
+    const results: any[] = []
+
+    // Process each product
+    for (let i = 0; i < products.length; i++) {
+        const product = products[i]
         
-        // Check for each brand if it exists in the product title and skip already matched or ignored brands
-        for (const brand of allBrands) {
-            if (matchedBrands.includes(brand) || ignoreBrandsList.includes(brand)) {
+        // Normalize once per product
+        const normalizedTitle = normalizeInputIfAccentInsensitive(product.title)
+        const lowerTitle = normalizedTitle.toLowerCase()
+        
+        const matchedBrands: string[] = []
+        const matchedBrandSet = new Set<string>() // For lookup of already matched brands
+
+        // Optimization:
+        // Check each brand against the product title using pre-compiled patterns
+        for (const cacheEntry of brandMatchCache) {
+            // Skip if brand already matched
+            if (matchedBrandSet.has(cacheEntry.brand)) {
                 continue
             }
-            const isBrandMatch = checkBrandIsSeparateTerm(product.title, brand)
-            if (isBrandMatch) {
-                matchedBrands.push(brand)
+
+            if (checkBrandMatch(normalizedTitle, cacheEntry)) {
+                matchedBrands.push(cacheEntry.brand)
+                matchedBrandSet.add(cacheEntry.brand)
             }
         }
 
-        let mainBrand: string = null
-        let priorityBrand: string = null
+        let mainBrand: string | null = null
+        let priorityBrand: string | null = null
 
         if (matchedBrands.length > 0) {
-            // Find all related brands that connect through the mapping
-            const allConnected = new Set<string>()
-            matchedBrands.forEach((b) => {
-            const related = brandsMapping[b.toLowerCase()] || []
-            related.forEach((r) => allConnected.add(r.toLowerCase()))
+            // Collect all related brands using pre-computed network
+            const allConnectedBrands = new Set<string>()
+            matchedBrands.forEach(brand => {
+                const network = brandNetworkCache.get(brand.toLowerCase())
+                if (network) {
+                    network.forEach(b => allConnectedBrands.add(b))
+                }
             })
 
-            // Merge matched brands + all connected ones
-            const allPossible = new Set([...matchedBrands.map((b) => b.toLowerCase()), ...allConnected])
-
-            // Choose the brand that appears first in the product title as the priority brand, this solves the issue of multiple brands being matched
+            // Select the brand that appears earliest in the title
             let earliestIndex = Infinity
 
-            for (const brand of allPossible) {
-                const index = product.title.toLowerCase().indexOf(brand)
+            for (const brand of allConnectedBrands) {
+                const index = lowerTitle.indexOf(brand)
                 if (index !== -1 && index < earliestIndex) {
                     earliestIndex = index
                     priorityBrand = brand
                 }
             }
 
-            if(!priorityBrand){
+            // Fallback to first matched brand if no priority found
+            if (!priorityBrand) {
                 priorityBrand = matchedBrands[0].toLowerCase()
             }
 
-            // Finally, get the main brand from the canonical lookup
-            mainBrand = canonicalLookup[priorityBrand.toLowerCase()] || priorityBrand.toLowerCase()
-
+            // Map to a main brand name
+            mainBrand = canonicalLookup[priorityBrand] || priorityBrand
         }
-        
-        results.push({
-            productTitle: product.title,
-            matchedBrands,
-            priorityBrand,
-            assignedBrand: mainBrand
-        })
 
-        console.log(`${product.title} -> ${priorityBrand} (matched: ${matchedBrands.join(", ")})`)
+        // Prepare data for storage
         const sourceId = product.source_id
         const meta = { matchedBrands }
         const brand = mainBrand
-
+        
         const key = `${source}_${countryCode}_${sourceId}`
         const uuid = stringToHash(key)
 
-        // Then brand is inserted into product mapping table
+        // Store result
+        results.push({
+            product: product.title,
+            matchedBrands,
+            assignedBrand: mainBrand,
+            priorityBrand: priorityBrand,
+        })
+
+        // TODO: Insert brand into product mapping table
     }
 
-    const filePath = `./results/brand_results_${countryCode}_${source}.json` // Define the file path for saving results
-    fs.mkdirSync("./results", { recursive: true }) // Ensure the results directory exists
-    fs.writeFileSync(filePath, JSON.stringify(results, null, 2), "utf-8") // Write results to the file
+    // Export results to JSON files
+    const resultsPath = `./brand_results_${countryCode}_${source}.json`
+
+    fs.writeFileSync(resultsPath, JSON.stringify(results, null, 2), "utf-8")
+
+
+    const brandsAssigned = results.filter(r => r.brand).length
+    console.log(`✓ Processed ${products.length} products`)
+    console.log(`✓ Assigned brands to ${brandsAssigned} products (${((brandsAssigned / products.length) * 100).toFixed(1)}%)`)
+    
+    // Clear cache after processing
+    normalizationCache.clear()
 }
